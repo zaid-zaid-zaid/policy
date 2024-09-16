@@ -1,4 +1,4 @@
-<h1 align="center">Policy-Guided Diffusion</h1>
+<h1 align="center">Regret-Guided Diffusion</h1>
 
 <p align="center">
     <a href= "https://arxiv.org/abs/2404.06356">
