@@ -121,6 +121,30 @@ def make_train_step(args, network, aux_networks):
             length=args.num_critic_updates_per_step,
         )
 
+        # Compute positive value loss
+        def _compute_positive_value_loss(rewards, dones, obs, actions, q1_params, q2_params):
+            q1_values = q_network.apply(q1_params, obs, actions)
+            q2_values = q_network.apply(q2_params, obs, actions)
+            q_values = jnp.minimum(q1_values, q2_values)
+            
+            T = rewards.shape[0]
+            discounted_returns = jnp.zeros_like(rewards)
+            for t in range(T-1, -1, -1):
+                discounted_returns = rewards[t] + args.gamma * (1 - dones[t]) * discounted_returns
+            
+            td_errors = discounted_returns - q_values
+            positive_value_loss = jnp.mean(jnp.maximum(td_errors, 0))
+            return positive_value_loss
+
+        positive_value_loss = _compute_positive_value_loss(
+            traj_batch.reward,
+            traj_batch.done,
+            traj_batch.obs,
+            traj_batch.action,
+            q1_state.params,
+            q2_state.params
+        )
+
         loss = {
             "q1_loss": q1_loss.mean(),
             "q2_loss": q2_loss.mean(),
@@ -128,6 +152,7 @@ def make_train_step(args, network, aux_networks):
             "q_mean": q_mean,
             "lmbda": lmbda,
             "bc_loss": bc_loss,
+            "positive_value_loss": positive_value_loss,
         }
         metric = traj_batch.info
         return (

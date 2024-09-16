@@ -1,6 +1,7 @@
 import jax
 import optax
 import jax.numpy as jnp
+import wandb
 
 
 EXP_ADV_MAX = 100.0
@@ -53,6 +54,23 @@ def make_train_step(args, network, aux_networks):
         )(value_train_state.params)
         value_train_state = value_train_state.apply_gradients(grads=value_grad)
 
+        # Compute positive value loss
+        def _compute_positive_value_loss(rewards, dones, value_preds):
+            T = rewards.shape[0]
+            discounted_returns = jnp.zeros_like(rewards)
+            for t in range(T-1, -1, -1):
+                discounted_returns = rewards[t] + args.gamma * (1 - dones[t]) * discounted_returns
+            
+            td_errors = discounted_returns - value_preds
+            positive_value_loss = jnp.mean(jnp.maximum(td_errors, 0))
+            return positive_value_loss
+
+        positive_value_loss = _compute_positive_value_loss(
+            traj_batch.reward,
+            traj_batch.done,
+            value_network.apply(value_train_state.params, traj_batch.obs)
+        )
+
         # --- Compute q targets ---
         def _compute_q_target(transition, next_v):
             return transition.reward + args.gamma * (1 - transition.done) * next_v
@@ -90,9 +108,11 @@ def make_train_step(args, network, aux_networks):
             "value_loss": value_loss,
             "q_loss": q_loss,
             "actor_loss": actor_loss,
+            "positive_value_loss": positive_value_loss,
         }
         metric = traj_batch.info
         loss = jax.tree_map(lambda x: x.mean(), loss)
+
         return (
             train_state,
             (q_train_state, q_target_train_state, value_train_state),

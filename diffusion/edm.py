@@ -108,8 +108,12 @@ def sample_trajectory(
     det_guidance=False,
     agent_apply_fn=None,
     agent_params=None,
-    value_network=None,  # Add this parameter
-    value_train_state=None,  # Add this parameter
+    value_network=None,  # For IQL
+    value_train_state=None,  # For IQL
+    q_network=None,  # For TD3+BC
+    q1_train_state=None,  # For TD3+BC
+    q2_train_state=None,  # For TD3+BC
+    args=None,       # To access args.agent
 ):
     # --- Compute noise schedule ---
     def _get_noise_schedule(num_diffusion_timesteps):
@@ -153,21 +157,47 @@ def sample_trajectory(
         obs = traj[:, :obs_dim]
         obs = unnormalise_traj(obs, denoiser_norm_stats["obs"])
 
-        # --- Compute guidance from value function ---
         action = traj[:, obs_dim : obs_dim + action_dim]
         action = unnormalise_traj(action, denoiser_norm_stats["action"])
 
-        def _value_gradient(action):
-            action = jnp.tanh(action)  # Apply tanh to match the action space
-            value = value_network.apply(value_train_state.params, obs, action)
-            return value.sum()
+        if args.agent == 'iql':
+            # IQL guidance using value function
+            def _value_gradient(action):
+                action = jnp.tanh(action)  # Apply tanh to match the action space
+                value = value_network.apply(value_train_state.params, obs, action)
+                return value.sum()
 
-        value_guidance = jax.grad(_value_gradient)(action)
+            action_guidance = jax.grad(_value_gradient)(action)
+
+        elif args.agent == 'td3_bc':
+            # TD3+BC guidance using minimum of Q-functions
+            def _q_gradient(action):
+                action = jnp.tanh(action)  # Apply tanh to match the action space
+                q1_value = q_network.apply(q1_train_state.params, obs, action)
+                q2_value = q_network.apply(q2_train_state.params, obs, action)
+                min_q_value = jnp.minimum(q1_value, q2_value)
+                return min_q_value.sum()
+
+            action_guidance = jax.grad(_q_gradient)(action)
+
+        else:
+            # Original policy-based guidance
+            pi = agent_apply_fn(agent_params, obs)
+            if det_guidance:
+                # Apply guidance to unit Gaussian around deterministic action
+                agent_action = pi.sample(seed=jax.random.PRNGKey(0))
+                pi = Normal(agent_action, 1.0)
+
+            def _transformed_action_log_prob(action):
+                action = jnp.tanh(action)
+                return pi.log_prob(action).sum()
+
+            action_guidance = jax.grad(_transformed_action_log_prob)(action)
 
         # --- Normalize and return guidance ---
         if normalize_action_guidance:
-            value_guidance = value_guidance / jnp.linalg.norm(value_guidance) + 1e-8
-        return value_guidance
+            action_guidance = action_guidance / jnp.linalg.norm(action_guidance) + 1e-8
+        return action_guidance
 
     def denoise_step(runner_state, step_coeffs):
         rng, noised_traj, step_idx = runner_state
